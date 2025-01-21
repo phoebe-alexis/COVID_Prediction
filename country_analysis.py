@@ -1,18 +1,17 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox, QComboBox, QSlider
-from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox, QDateEdit, QDialog, QSlider
+)
+from PyQt5.QtCore import QDate, Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import geopandas as gpd
+import pandas as pd
+import numpy as np
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
-import pandas as pd
 import seaborn as sns
-import sys
-import numpy as np 
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from datetime import datetime, timedelta
 
 
 class CountryAnalysis(QWidget):
@@ -22,6 +21,9 @@ class CountryAnalysis(QWidget):
         self.setWindowTitle("Country-wide Analysis")
         self.setGeometry(100, 100, 1000, 700)
         self.setup_ui()
+        self.selected_date = None  # To store the user-selected prediction date
+        self.future_predictions = None  # To store future predictions
+        self.predicted_cumulative_cases = None  # To store predicted cumulative cases
 
     def setup_ui(self):
         self.layout = QVBoxLayout(self)
@@ -51,49 +53,57 @@ class CountryAnalysis(QWidget):
         self.layout.addWidget(back_button)
 
     def graphical_view(self):
-        print("Graphical View button clicked.")  # Debugging
-
         try:
             # File path for the dataset
             file_path = '/Users/phoebegwimo/Library/Mobile Documents/com~apple~CloudDocs/TU Braunschweig /Semester 3/Python Lab/COVID_Prediction/time_series_covid19_confirmed_US.csv'
             data = pd.read_csv(file_path)
 
-            # Extract date columns and calculate cases
-            date_columns = data.columns[11:]  # Assuming first 11 columns are metadata
+            # Extract date columns and calculate cumulative cases and daily new cases
+            date_columns = data.columns[11:]
             cumulative_cases = data[date_columns].sum().values.astype(float)
             dates = pd.to_datetime(date_columns, format='%m/%d/%y')
             daily_new_cases = np.diff(cumulative_cases, prepend=0)
 
+            # Prompt the user to select a date for predictions
+            dialog = DatePickerDialog(self)
+            if dialog.exec() != QDialog.Accepted:
+                return  # Exit if the user cancels the date selection
+            self.selected_date = pd.to_datetime(dialog.get_selected_date())
+
+            # Validate selected date
+            last_date = dates[-1]
+            if self.selected_date <= last_date:
+                QMessageBox.warning(self, "Error", "Selected date must be in the future.")
+                return
+
+            # Calculate days to predict
+            days_to_predict = (self.selected_date - last_date).days
+
             # Configure SARIMA model
-            p, d, q = 1, 1, 1
-            P, D, Q, s = 1, 1, 1, 7  # Weekly seasonality
-            sarima_model = SARIMAX(daily_new_cases, order=(p, d, q), seasonal_order=(P, D, Q, s))
+            sarima_model = SARIMAX(daily_new_cases, order=(1, 1, 1), seasonal_order=(1, 1, 1, 7))
             sarima_fit = sarima_model.fit(disp=False)
 
-            # Make predictions
-            today = pd.Timestamp(datetime.today().strftime('%Y-%m-%d'))
-            last_date = dates[-1]
-            days_to_predict = (today - last_date).days
-            future_predictions = sarima_fit.forecast(steps=days_to_predict)
-            future_predictions = np.clip(future_predictions, 0, None)
-            predicted_cumulative_cases = np.cumsum(future_predictions) + cumulative_cases[-1]
+            # Predict future cases
+            self.future_predictions = sarima_fit.forecast(steps=days_to_predict)
+            self.future_predictions = np.clip(self.future_predictions, 0, None)
+            self.predicted_cumulative_cases = np.cumsum(self.future_predictions) + cumulative_cases[-1]
             future_dates = [last_date + timedelta(days=i + 1) for i in range(days_to_predict)]
 
             # Create plots
             fig, axes = plt.subplots(1, 2, figsize=(16, 6), dpi=100)
 
-            # Cumulative total cases
+            # Cumulative total cases plot
             axes[0].plot(dates, cumulative_cases, label='Actual Total Cases', color='blue', alpha=0.6)
-            axes[0].plot(future_dates, predicted_cumulative_cases, label='Predicted Total Cases', color='red', linestyle='--')
+            axes[0].plot(future_dates, self.predicted_cumulative_cases, label='Predicted Total Cases', color='red', linestyle='--')
             axes[0].set_title('Cumulative Total Cases (SARIMA)', fontsize=16)
             axes[0].set_xlabel('Date', fontsize=14)
             axes[0].set_ylabel('Total Cases', fontsize=14)
             axes[0].legend()
             axes[0].grid(True, linestyle='--', alpha=0.6)
 
-            # Daily new cases
+            # Daily new cases plot
             axes[1].bar(dates, daily_new_cases, label='Actual Daily New Cases', color='gray', alpha=0.5, width=2)
-            axes[1].bar(future_dates, future_predictions, label='Predicted Daily New Cases', color='red', alpha=0.5, width=2)
+            axes[1].bar(future_dates, self.future_predictions, label='Predicted Daily New Cases', color='red', alpha=0.5, width=2)
             axes[1].set_title('Daily New Cases (SARIMA)', fontsize=16)
             axes[1].set_xlabel('Date', fontsize=14)
             axes[1].set_ylabel('New Cases', fontsize=14)
@@ -102,22 +112,40 @@ class CountryAnalysis(QWidget):
 
             plt.tight_layout()
 
-            # Display the plot using matplotlib's interactive window
+            # Display the plot
             canvas = FigureCanvas(fig)
             self.layout.addWidget(canvas)
             canvas.draw()
 
+            # Add the Make Prediction button
+            predict_button = QPushButton("Make Prediction", self)
+            predict_button.setStyleSheet("font-size: 16px; background-color: orange; color: white; padding: 10px;")
+            predict_button.clicked.connect(self.make_prediction)
+            self.layout.addWidget(predict_button)
+
         except FileNotFoundError:
             QMessageBox.critical(self, "Error", "Dataset not found. Please ensure the file is in the correct location.")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred: {e}")
+            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
 
-    def navigate_back(self):
-        self.parent.analyze_data_page()  # Navigate to Analyze Data Page
-        self.close()
+    def make_prediction(self):
+        """Display numerical results for the user-selected date."""
+        if self.selected_date is None or self.future_predictions is None:
+            QMessageBox.warning(self, "Error", "Please generate predictions first by selecting a date in Graphical View.")
+            return
 
+        # Get the last prediction (for the user-selected date)
+        predicted_new_cases = self.future_predictions[-1]
+        predicted_total_cases = self.predicted_cumulative_cases[-1]
 
-################################
+        QMessageBox.information(
+            self,
+            "Prediction Results",
+            f"Predicted new cases for the US on {self.selected_date.strftime('%Y-%m-%d')}: {int(predicted_new_cases)}\n"
+            f"Predicted total cases for the US on {self.selected_date.strftime('%Y-%m-%d')}: {int(predicted_total_cases)}"
+        )
+
+    
 
     def geographical_view(self):
         print("Geographical View button clicked.")  # Debugging
@@ -223,3 +251,39 @@ class CountryAnalysis(QWidget):
             QMessageBox.critical(self, "Error", f"An error occurred: {e}")
 
              
+
+    def navigate_back(self):
+        self.parent.analyze_data_page() if self.parent else self.close()
+
+
+class DatePickerDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select a Prediction Date")
+        self.setGeometry(300, 200, 400, 150)
+        
+        layout = QVBoxLayout(self)
+
+        # Instruction Label
+        instruction_label = QLabel("Please select a prediction date:")
+        layout.addWidget(instruction_label)
+
+        # Date Picker
+        self.date_picker = QDateEdit(self)
+        self.date_picker.setCalendarPopup(True)
+        self.date_picker.setDate(QDate.currentDate())
+        self.date_picker.setDisplayFormat("yyyy-MM-dd")
+        layout.addWidget(self.date_picker)
+
+        # OK Button
+        ok_button = QPushButton("OK", self)
+        ok_button.clicked.connect(self.accept)
+        layout.addWidget(ok_button)
+
+        # Cancel Button
+        cancel_button = QPushButton("Cancel", self)
+        cancel_button.clicked.connect(self.reject)
+        layout.addWidget(cancel_button)
+
+    def get_selected_date(self):
+        return self.date_picker.date().toString("yyyy-MM-dd")
