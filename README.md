@@ -1,0 +1,1 @@
+The repository phoebe-alexis/COVID_Prediction is designed to predict COVID-19 cases using machine learning models. It includes data analysis, feature engineering, and model training to forecast virus spread and impact, aiding healthcare decisions and public awareness. The project is built with Python and various data visualization tools. 
